@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ネオン・サバイバー</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #0f0f1a;
+            color: white;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            user-select: none;
+        }
+        canvas {
+            display: block;
+        }
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            pointer-events: none;
+            text-shadow: 0 0 5px #000;
+        }
+        #score-display { font-size: 24px; font-weight: bold; }
+        #level-display { font-size: 20px; color: #00ffff; margin-top: 5px;}
+        
+        #game-over-screen {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 40px;
+            border-radius: 15px;
+            border: 2px solid #ff0055;
+            box-shadow: 0 0 20px #ff0055;
+            display: none;
+        }
+        #game-over-screen h1 { margin-top: 0; color: #ff0055; font-size: 48px; }
+        #final-score { font-size: 24px; margin-bottom: 30px; }
+        button {
+            padding: 15px 30px;
+            font-size: 20px;
+            font-weight: bold;
+            color: #000;
+            background-color: #00ffff;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            box-shadow: 0 0 10px #00ffff;
+            transition: transform 0.1s;
+        }
+        button:hover { transform: scale(1.05); background-color: #fff; box-shadow: 0 0 20px #fff;}
+        button:active { transform: scale(0.95); }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <div id="score-display">スコア: 0</div>
+        <div id="level-display">レベル: 1 (次のレベルまで: 0%)</div>
+    </div>
+
+    <div id="game-over-screen">
+        <h1>GAME OVER</h1>
+        <div id="final-score">最終スコア: 0</div>
+        <button onclick="startGame()">もう一度プレイ</button>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const scoreDisplay = document.getElementById('score-display');
+        const levelDisplay = document.getElementById('level-display');
+        const gameOverScreen = document.getElementById('game-over-screen');
+        const finalScoreDisplay = document.getElementById('final-score');
+
+        // キャンバスサイズを画面に合わせる
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // マウス位置
+        let mouse = { x: canvas.width / 2, y: canvas.height / 2 };
+        canvas.addEventListener('mousemove', (e) => {
+            mouse.x = e.clientX;
+            mouse.y = e.clientY;
+        });
+        canvas.addEventListener('touchmove', (e) => {
+            mouse.x = e.touches[0].clientX;
+            mouse.y = e.touches[0].clientY;
+        }, {passive: false});
+
+        // ゲーム変数の初期化
+        let player, enemies, bullets, particles, gems;
+        let score, level, xp, xpNeeded, isGameOver;
+        let animationId;
+        let frameCount = 0;
+        let enemySpawnRate = 60; // 敵の出現頻度
+
+        // クラス定義
+        class Player {
+            constructor() {
+                this.x = canvas.width / 2;
+                this.y = canvas.height / 2;
+                this.radius = 15;
+                this.color = '#00ffff';
+                this.speed = 5;
+                this.shootTimer = 0;
+                this.shootInterval = 30; // 射撃間隔（レベルアップで短くなる）
+                this.bulletSpeed = 10;
+                this.multiShot = 1; // 同時に撃つ弾の数
+            }
+            update() {
+                // マウスに向かって滑らかに移動
+                const dx = mouse.x - this.x;
+                const dy = mouse.y - this.y;
+                const distance = Math.hypot(dx, dy);
+                if (distance > this.speed) {
+                    this.x += (dx / distance) * this.speed;
+                    this.y += (dy / distance) * this.speed;
+                }
+
+                // 画面外に出ないようにする
+                this.x = Math.max(this.radius, Math.min(canvas.width - this.radius, this.x));
+                this.y = Math.max(this.radius, Math.min(canvas.height - this.radius, this.y));
+
+                // 自動射撃
+                this.shootTimer++;
+                if (this.shootTimer >= this.shootInterval && enemies.length > 0) {
+                    this.shoot();
+                    this.shootTimer = 0;
+                }
+            }
+            draw() {
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fillStyle = this.color;
+                ctx.shadowBlur = 15;
+                ctx.shadowColor = this.color;
+                ctx.fill();
+                ctx.shadowBlur = 0; // リセット
+            }
+            shoot() {
+                // 最も近い敵を探す
+                let closestEnemy = null;
+                let minDistance = Infinity;
+                enemies.forEach(enemy => {
+                    const dist = Math.hypot(this.x - enemy.x, this.y - enemy.y);
+                    if (dist < minDistance) {
+                        minDistance = dist;
+                        closestEnemy = enemy;
+                    }
+                });
+
+                if (closestEnemy) {
+                    const angle = Math.atan2(closestEnemy.y - this.y, closestEnemy.x - this.x);
+                    
+                    // マルチショットの処理（扇状に発射）
+                    const spread = 0.2; // 弾の拡散角度
+                    const startAngle = angle - (spread * (this.multiShot - 1)) / 2;
+
+                    for(let i=0; i < this.multiShot; i++){
+                        const currentAngle = startAngle + (spread * i);
+                        const velocity = {
+                            x: Math.cos(currentAngle) * this.bulletSpeed,
+                            y: Math.sin(currentAngle) * this.bulletSpeed
+                        };
+                        bullets.push(new Bullet(this.x, this.y, velocity));
+                    }
+                }
+            }
+        }
+
+        class Enemy {
+            constructor() {
+                this.radius = Math.random() * 10 + 10;
+                this.color = '#ff0055';
+                // 画面外から出現
+                if (Math.random() < 0.5) {
+                    this.x = Math.random() < 0.5 ? 0 - this.radius : canvas.width + this.radius;
+                    this.y = Math.random() * canvas.height;
+                } else {
+                    this.x = Math.random() * canvas.width;
+                    this.y = Math.random() < 0.5 ? 0 - this.radius : canvas.height + this.radius;
+                }
+                // レベルに応じて敵の速度を上げる
+                const baseSpeed = Math.random() * 1.5 + 0.5;
+                this.speed = baseSpeed + (level * 0.1); 
+            }
+            update() {
+                const angle = Math.atan2(player.y - this.y, player.x - this.x);
+                this.x += Math.cos(angle) * this.speed;
+                this.y += Math.sin(angle) * this.speed;
+            }
+            draw() {
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fillStyle = this.color;
+                ctx.shadowBlur = 10;
+                ctx.shadowColor = this.color;
+                ctx.fill();
+                ctx.shadowBlur = 0;
+            }
+        }
+
+        class Bullet {
+            constructor(x, y, velocity) {
+                this.x = x;
+                this.y = y;
+                this.velocity = velocity;
+                this.radius = 4;
+                this.color = '#ffff00';
+            }
+            update() {
+                this.x += this.velocity.x;
+                this.y += this.velocity.y;
+            }
+            draw() {
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fillStyle = this.color;
+                ctx.fill();
+            }
+        }
+
+        class Particle {
+            constructor(x, y, color) {
+                this.x = x;
+                this.y = y;
+                this.radius = Math.random() * 3 + 1;
+                this.color = color;
+                const angle = Math.random() * Math.PI * 2;
+                const speed = Math.random() * 5 + 2;
+                this.velocity = { x: Math.cos(angle) * speed, y: Math.sin(angle) * speed };
+                this.alpha = 1;
+            }
+            update() {
+                this.x += this.velocity.x;
+                this.y += this.velocity.y;
+                this.alpha -= 0.02;
+            }
+            draw() {
+                ctx.save();
+                ctx.globalAlpha = this.alpha;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fillStyle = this.color;
+                ctx.fill();
+                ctx.restore();
+            }
+        }
+
+        class Gem {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.radius = 6;
+                this.color = '#00ffaa';
+            }
+            update() {
+                // プレイヤーが近づいたら引き寄せられる
+                const dist = Math.hypot(player.x - this.x, player.y - this.y);
+                if (dist < 100) {
+                    const angle = Math.atan2(player.y - this.y, player.x - this.x);
+                    this.x += Math.cos(angle) * 7;
+                    this.y += Math.sin(angle) * 7;
+                }
+            }
+            draw() {
+                ctx.beginPath();
+                ctx.moveTo(this.x, this.y - this.radius);
+                ctx.lineTo(this.x + this.radius, this.y);
+                ctx.lineTo(this.x, this.y + this.radius);
+                ctx.lineTo(this.x - this.radius, this.y);
+                ctx.fillStyle = this.color;
+                ctx.shadowBlur = 5;
+                ctx.shadowColor = this.color;
+                ctx.fill();
+                ctx.shadowBlur = 0;
+            }
+        }
+
+        // ゲーム初期化・開始
+        function startGame() {
+            player = new Player();
+            enemies = [];
+            bullets = [];
+            particles = [];
+            gems = [];
+            score = 0;
+            level = 1;
+            xp = 0;
+            xpNeeded = 5;
+            frameCount = 0;
+            enemySpawnRate = 60;
+            isGameOver = false;
+            
+            gameOverScreen.style.display = 'none';
+            mouse.x = canvas.width / 2;
+            mouse.y = canvas.height / 2;
+            updateUI();
+            
+            cancelAnimationFrame(animationId);
+            animate();
+        }
+
+        function updateUI() {
+            scoreDisplay.innerHTML = `スコア: ${score}`;
+            const xpPercent = Math.floor((xp / xpNeeded) * 100);
+            levelDisplay.innerHTML = `レベル: ${level} <span style="font-size:14px; color:#aaa;">(次まで: ${xpPercent}%)</span>`;
+        }
+
+        function levelUp() {
+            level++;
+            xp = 0;
+            xpNeeded = Math.floor(xpNeeded * 1.5); // 次のレベルに必要な経験値を増やす
+            
+            // パワーアップ処理
+            if (level % 3 === 0) {
+                player.multiShot++; // 3レベルごとに弾の数が増える
+            } else {
+                player.shootInterval = Math.max(5, player.shootInterval - 3); // 発射速度アップ
+            }
+            
+            // 敵の出現頻度アップ（難易度上昇）
+            enemySpawnRate = Math.max(10, enemySpawnRate - 5);
+            
+            updateUI();
+            
+            // レベルアップエフェクト
+            for(let i=0; i<30; i++){
+                particles.push(new Particle(player.x, player.y, '#ffffff'));
+            }
+        }
+
+        // メインループ
+        function animate() {
+            if (isGameOver) return;
+            animationId = requestAnimationFrame(animate);
+            frameCount++;
+
+            // 背景描画（軌跡を残す演出）
+            ctx.fillStyle = 'rgba(15, 15, 26, 0.3)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // プレイヤーの更新と描画
+            player.update();
+            player.draw();
+
+            // 敵をスポーン
+            if (frameCount % enemySpawnRate === 0) {
+                enemies.push(new Enemy());
+            }
+
+            // パーティクルの更新と描画
+            for (let i = particles.length - 1; i >= 0; i--) {
+                const p = particles[i];
+                p.update();
+                p.draw();
+                if (p.alpha <= 0) particles.splice(i, 1);
+            }
+
+            // 経験値ジェムの更新と描画
+            for (let i = gems.length - 1; i >= 0; i--) {
+                const gem = gems[i];
+                gem.update();
+                gem.draw();
+                
+                // プレイヤーとジェムの衝突（取得）
+                const dist = Math.hypot(player.x - gem.x, player.y - gem.y);
+                if (dist - player.radius - gem.radius < 0) {
+                    gems.splice(i, 1);
+                    score += 10;
+                    xp++;
+                    if (xp >= xpNeeded) levelUp();
+                    updateUI();
+                }
+            }
+
+            // 弾の更新と描画
+            for (let i = bullets.length - 1; i >= 0; i--) {
+                const bullet = bullets[i];
+                bullet.update();
+                bullet.draw();
+
+                // 画面外に出た弾を削除
+                if (bullet.x < 0 || bullet.x > canvas.width || bullet.y < 0 || bullet.y > canvas.height) {
+                    bullets.splice(i, 1);
+                    continue;
+                }
+            }
+
+            // 敵の更新と描画・衝突判定
+            for (let i = enemies.length - 1; i >= 0; i--) {
+                const enemy = enemies[i];
+                enemy.update();
+                enemy.draw();
+
+                // プレイヤーとの衝突判定（ゲームオーバー）
+                const distToPlayer = Math.hypot(player.x - enemy.x, player.y - enemy.y);
+                if (distToPlayer - player.radius - enemy.radius < 0) {
+                    isGameOver = true;
+                    // 爆発エフェクト
+                    for(let j=0; j<50; j++) particles.push(new Particle(player.x, player.y, player.color));
+                    
+                    setTimeout(() => {
+                        finalScoreDisplay.innerHTML = `最終スコア: ${score} <br> 到達レベル: ${level}`;
+                        gameOverScreen.style.display = 'block';
+                    }, 500);
+                }
+
+                // 弾と敵の衝突判定
+                for (let j = bullets.length - 1; j >= 0; j--) {
+                    const bullet = bullets[j];
+                    const distToBullet = Math.hypot(bullet.x - enemy.x, bullet.y - enemy.y);
+
+                    if (distToBullet - enemy.radius - bullet.radius < 0) {
+                        // 爆発エフェクト
+                        for(let k=0; k<8; k++) particles.push(new Particle(enemy.x, enemy.y, enemy.color));
+                        // ジェムを落とす
+                        gems.push(new Gem(enemy.x, enemy.y));
+                        
+                        // 敵と弾を削除
+                        enemies.splice(i, 1);
+                        bullets.splice(j, 1);
+                        break; // この敵は倒されたので次の敵へ
+                    }
+                }
+            }
+        }
+
+        // ゲーム開始
+        startGame();
+
+    </script>
+</body>
+</html>
